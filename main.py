@@ -494,27 +494,21 @@ async def update_statistics_task():
         update_statistics()  # Обновляем статистику
         await asyncio.sleep(86400)  # Задержка 24 часа
 
-@dp.callback_query_handler(lambda c: c.data.startswith("code_entered_") or c.data.startswith("code_dropped_"))
-async def handle_code_status(callback_query: types.CallbackQuery):
+@dp.callback_query_handler(lambda c: c.data.startswith("code_entered_"))
+async def handle_code_confirmation(callback_query: types.CallbackQuery):
     number = callback_query.data.split("_")[-1]
-    user_id = user_numbers.get(number, {}).get("user_id")
 
-    if not user_id:
-        return await callback_query.answer("Ошибка: номер не найден!")
+    # Сохраняем номер в БД
+    save_confirmed_number(number)
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # Отправляем уведомление пользователю
+    await bot.send_message(callback_query.from_user.id, f"✅ Ваш номер {number} подтвержден и сохранен!")
 
-    if callback_query.data.startswith("code_entered_"):
-        save_number_status(user_id, number, "confirmed", now)
-        text = f"✅ Номер {number} подтверждён в {now}!"
-    else:
-        save_number_status(user_id, number, "dropped", now)
-        text = f"❌ Номер {number} помечен как слетевший в {now}!"
+    # Обновляем статистику в админ-панели
+    await admin_list(callback_query)
 
-    await bot.send_message(user_id, text)
-    await bot.send_message(ADMIN_GROUP_ID, text)
-    await callback_query.answer("✅ Данные сохранены!")
-    
+    await callback_query.answer("✅ Номер успешно записан!")
+
     # Создаем инлайн кнопку "Вернуться в меню"
     back_to_main_menu = InlineKeyboardMarkup().add(
         InlineKeyboardButton("🏠 Вернуться в главное меню", callback_data="back_to_main_menu")
@@ -616,10 +610,38 @@ def admin_panel():
     menu = InlineKeyboardMarkup(row_width=2)
     menu.add(
         InlineKeyboardButton("📊 Общая статистика", callback_data="admin_stats"),
-        InlineKeyboardButton("📤 Сдать номер", callback_data="submit_number"),
-        InlineKeyboardButton("💰 Вывести", callback_data="withdraw")
+        InlineKeyboardButton("📜 Список", callback_data="admin_list"),  # список
+        #InlineKeyboardButton("📤 Сдать номер", callback_data="submit_number"),
+        #InlineKeyboardButton("💰 Вывести", callback_data="withdraw")
     )
     return menu
+
+ #Функция для получения ТОЛЬКО подтвержденных номеров
+def get_confirmed_numbers():
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT number, time FROM confirmed_numbers")  
+    numbers = cursor.fetchall()
+    conn.close()
+    return numbers if numbers else []
+
+# Обработчик кнопки "📜 Список"
+@dp.callback_query_handler(lambda c: c.data == "admin_list")
+async def admin_list(call: types.CallbackQuery):
+    confirmed_numbers = get_confirmed_numbers()  # Получаем подтвержденные номера
+
+    if not confirmed_numbers:
+        await call.message.answer("⚠️ Подтвержденных номеров нет.")
+        await call.answer()
+        return
+
+    # Формируем список номеров
+    list_text = "📜 **Список подтвержденных номеров:**\n\n"
+    list_text += "\n".join([f"📞 {num[0]} - 🕒 {num[1]}" for num in confirmed_numbers])
+
+    # Отправляем список
+    await call.message.answer(list_text, parse_mode="Markdown")
+    await call.answer()
 
 # Обработчик команды /admin
 @dp.message_handler(commands=['admin'])
@@ -631,103 +653,87 @@ async def admin_menu(message: types.Message):
     # Передаем клавиатуру в ответ
     await message.answer("🔧 Админ-панель:", reply_markup=admin_panel())
 
-# Функции для работы с подтвержденными номерами
-def add_confirmed_number(number, time):
-    try:
-        conn = sqlite3.connect("bot_database.db")
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO confirmed_numbers (number, time) VALUES (?, ?)", (number, time))
-        conn.commit()
-    except sqlite3.Error as e:
-        print(f"Error adding confirmed number: {e}")
-    finally:
-        conn.close()
-
-def add_rejected_number(number, time):
-    try:
-        conn = sqlite3.connect("bot_database.db")
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO rejected_numbers (number, time) VALUES (?, ?)", (number, time))
-        conn.commit()
-    except sqlite3.Error as e:
-        print(f"Error adding rejected number: {e}")
-    finally:
-        conn.close()
-
-def get_confirmed_numbers():
-    try:
-        conn = sqlite3.connect("bot_database.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM confirmed_numbers")
-        numbers = cursor.fetchall()
-        return numbers
-    except sqlite3.Error as e:
-        print(f"Error fetching confirmed numbers: {e}")
-        return []
-    finally:
-        conn.close()
-
-def get_rejected_numbers():
-    try:
-        conn = sqlite3.connect("bot_database.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM rejected_numbers")
-        numbers = cursor.fetchall()
-        return numbers
-    except sqlite3.Error as e:
-        print(f"Error fetching rejected numbers: {e}")
-        return []
-    finally:
-        conn.close()
-
-def get_all_users_count():
-    try:
-        conn = sqlite3.connect("bot_database.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM users")
-        result = cursor.fetchone()
-        return result[0] if result else 0
-    except sqlite3.Error as e:
-        print(f"Error fetching users count: {e}")
-        return 0
-    finally:
-        conn.close()
-
-def get_total_balance():
-    try:
-        conn = sqlite3.connect("bot_database.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT SUM(balance) FROM users")
-        result = cursor.fetchone()
-        return result[0] if result else 0
-    except sqlite3.Error as e:
-        print(f"Error fetching total balance: {e}")
-        return 0
-    finally:
-        conn.close()
-
 # Обработчик для кнопки "Общая статистика"
+@dp.callback_query_handler(lambda c: c.data == "admin_stats")
 async def admin_stats(call: types.CallbackQuery):
     # Получаем статистику из базы данных
     confirmed_numbers = get_confirmed_numbers()
-    dropped_numbers = get_dropped_numbers()
-    total_users = get_all_users_count()  # Общее количество пользователей
-    total_balance = get_total_balance()  # Общий баланс пользователей
+    rejected_numbers = get_rejected_numbers()
+    total_users = get_all_users_count()
+    total_balance = get_total_balance()
+
+    # Логируем полученные данные
+    logging.info(f"✅ Подтвержденные номера: {confirmed_numbers}")
+    logging.info(f"❌ Отклоненные номера: {rejected_numbers}")
+    logging.info(f"👥 Количество пользователей: {total_users}")
+    logging.info(f"💰 Общий баланс: {total_balance}")
 
     # Формируем текст статистики
     stats_text = """📊 **Общая статистика**
-✅ Подтвержденные номера: {len(confirmed_numbers)}
-{''.join([f"📞 {num[0]} - 🕒 {num[1]}\n" for num in confirmed_numbers])}
+✅ Подтвержденные номера: {confirmed}
+{confirmed_list}
 
-❌ Слетевшие номера: {len(dropped_numbers)}
-{''.join([f"❌ {num[0]} - 🕒 {num[1]}\n" for num in dropped_numbers])}
+❌ Отклоненные номера: {rejected}
+{rejected_list}
 
-👥 Общее количество пользователей: {total_users}
-💰 Общий баланс пользователей: {total_balance} USD
-"""
+👥 Общее количество пользователей: {users}
+💰 Общий баланс пользователей: {balance} USD
+""".format(
+        confirmed=len(confirmed_numbers),
+        confirmed_list="\n".join([f"📞 {num[0]} - 🕒 {num[1]}" for num in confirmed_numbers]) if confirmed_numbers else "—",
+        rejected=len(rejected_numbers),
+        rejected_list="\n".join([f"❌ {num[0]} - 🕒 {num[1]}" for num in rejected_numbers]) if rejected_numbers else "—",
+        users=total_users,
+        balance=total_balance
+    )
 
     # Отправка обновленной статистики
     await call.message.edit_text(stats_text, parse_mode="Markdown", reply_markup=admin_panel())
+    await call.answer()
+# === 📂 Мои номера ===
+@dp.callback_query_handler(lambda c: c.data == "my_numbers")
+async def my_numbers(call: types.CallbackQuery):
+    user_id = call.from_user.id
+
+    # Получаем подтвержденные и слетевшие номера для пользователя
+    confirmed_numbers = get_user_numbers(user_id, status="confirmed")
+    rejected_numbers = get_user_numbers(user_id, status="rejected")
+
+    message_text = "📂 **Ваши номера:**\n\n"
+
+    # Подтвержденные номера
+    if confirmed_numbers:
+        message_text += "✅ Подтвержденные номера:\n" + "\n".join(
+            [f"📞 {num[0]} - 🕒 {num[1]}" for num in confirmed_numbers]
+        ) + "\n\n"
+    else:
+        message_text += "✅ У вас нет подтвержденных номеров.\n\n"
+
+    # Отклоненные номера
+    if rejected_numbers:
+        message_text += "⚠️ Отклоненные номера:\n" + "\n".join(
+            [f"❌ {num[0]} - 🕒 {num[1]}" for num in rejected_numbers]
+        ) + "\n\n"
+    else:
+        message_text += "❌ У вас нет отклоненных номеров.\n\n"
+
+    # Статистика
+    total_confirmed = len(confirmed_numbers)
+    total_rejected = len(rejected_numbers)
+
+    message_text += f"📊 **Статистика:**\n"
+    message_text += f"✅ Подтвержденных номеров: {total_confirmed}\n"
+    message_text += f"❌ Отклоненных номеров: {total_rejected}"
+
+    # Отправляем сообщение
+    await call.message.answer(message_text)
+
+    # Кнопка "Вернуться в главное меню"
+    back_to_main_menu = InlineKeyboardMarkup()
+    back_to_main_menu.add(InlineKeyboardButton("🏠 Вернуться в главное меню", callback_data="back_to_main_menu"))
+
+    await call.message.answer("Выберите действие:", reply_markup=back_to_main_menu)
+    await call.answer()
 
 # Функция для добавления пользователя в базу данных
 def add_user(user_id, username, referral_code=None, referred_by=None):
