@@ -1,0 +1,4 @@
+aiogram
+sqlite3
+python-dotenv
+asyncio
